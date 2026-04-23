@@ -8,6 +8,7 @@ from mom6_forge._supergrid import (
     UniformSphericalSupergrid,
     RectilinearCartesianSupergrid,
     SupergridBase,
+    mom6_angle_calculation_method,
 )
 from mom6_forge.utils import normalize_deg
 
