@@ -387,3 +387,30 @@ def fill_missing_data(idata, mask, maxiter=0, stabilizer=1.0e-14, tripole=False)
         x, info = scipy.sparse.linalg.bicg(A, b, maxiter=maxiter)
     new_data[missing_j, missing_i] = x
     return new_data
+
+
+def compute_subsampling_factor(src_nj, src_ni, dst_nj, dst_ni):
+    """
+    Compute the sub-sampling factors needed so that the super-sampled
+    destination grid has at least as many points as the source grid.
+
+    Parameters
+    ----------
+    src_nj, src_ni : int
+        Source grid dimensions.
+    dst_nj, dst_ni : int
+        Destination grid dimensions.
+
+    Returns
+    -------
+    ny_sub, nx_sub : int
+    """
+    nx_sub = 1
+    while nx_sub * dst_ni < src_ni:
+        nx_sub += 1
+
+    ny_sub = 1
+    while ny_sub * dst_nj < src_nj:
+        ny_sub += 1
+
+    return ny_sub, nx_sub

@@ -13,7 +13,7 @@ from mom6_forge.git_utils import get_domain_dir, get_repo
 from pathlib import Path
 from mom6_forge.edit_command import *
 from mom6_forge.command_manager import TopoCommandManager, CommandType
-from mom6_forge.mapping import regrid_dataset_via_xesmf
+from mom6_forge.mapping import regrid_dataset_via_xesmf, regrid_with_subsampling
 from mom6_forge._source_bathy import SourceBathy
 import regionmask
 
@@ -493,6 +493,10 @@ class Topo:
         )
         return self.src
 
+    @property
+    def stats(self):
+        return self.src.stats if self.src is not None else None
+
     def clear_user_mask(self):
         cmd = ClearMaskCommand(
             self, message="Clear manual mask"
@@ -775,6 +779,99 @@ class Topo:
 
         # Save to object (Build TCM Object)
         self.send_entire_depth_change_to_tcm(new_values)
+
+    def _compute_stats(self, nx_sub, ny_sub, mask_hmin):
+        """Compute per-cell depth statistics by uniform sub-sampling.
+
+        Results are stored on ``stats`` so a second call with the
+        same source file returns immediately without recomputation.
+        (Originally created by Frank Bryan in Fortran for NCAR/tx2_3, reimplemented in Python)
+
+        Parameters
+        ----------
+        src : SourceBathy (part of class)
+        nx_sub, ny_sub : int
+        mask_hmin : float
+
+        Returns
+        -------
+        xr.Dataset  —  ``OCN_FRAC``, ``D_mean``, ``D_min``, ``D_max``, ``D2_mean``.
+        """
+        assert (
+            self.src is not None
+        ), "Source bathymetry must be loaded to compute topo stats"
+        if (
+            self.stats is not None
+            and self.stats.attrs.get("nx_sub") == nx_sub
+            and self.stats.attrs.get("ny_sub") == ny_sub
+            and self.stats.attrs.get("mask_hmin") == mask_hmin
+        ):
+            return self.stats
+
+        # Compute subsampling factor and generate sub-point grid
+        ds, _ = regrid_with_subsampling(
+            input_dataset=self.src.ds,
+            qlon=self._grid.qlon.values,
+            qlat=self._grid.qlat.values,
+            nx_sub=nx_sub,
+            ny_sub=ny_sub,
+            regridding_method="nearest_s2d",
+        )
+
+        depth_sub = ds[self.src.depth_name].values  # (ny, nx, ny_sub, nx_sub)
+
+        is_ocean = depth_sub > mask_hmin
+        ocn_frac = is_ocean.sum(axis=(-2, -1)) / (nx_sub * ny_sub)
+
+        depth_ocean = np.where(is_ocean, depth_sub, np.nan)
+        with np.errstate(all="ignore"):
+            D_mean = np.nanmean(depth_ocean, axis=(-2, -1))
+            D_min = np.nanmin(depth_ocean, axis=(-2, -1))
+            D_max = np.nanmax(depth_ocean, axis=(-2, -1))
+            D2_mean = np.nanmean(depth_ocean**2, axis=(-2, -1))
+
+        dims = ["ny", "nx"]
+        self.src.stats = xr.Dataset(
+            {
+                "OCN_FRAC": xr.DataArray(
+                    ocn_frac,
+                    dims=dims,
+                    attrs={
+                        "long_name": "ocean fraction from sub-sampling",
+                        "units": "1",
+                    },
+                ),
+                "D_mean": xr.DataArray(
+                    D_mean,
+                    dims=dims,
+                    attrs={"long_name": "mean ocean depth in cell", "units": "m"},
+                ),
+                "D_min": xr.DataArray(
+                    D_min,
+                    dims=dims,
+                    attrs={"long_name": "minimum ocean depth in cell", "units": "m"},
+                ),
+                "D_max": xr.DataArray(
+                    D_max,
+                    dims=dims,
+                    attrs={"long_name": "maximum ocean depth in cell", "units": "m"},
+                ),
+                "D2_mean": xr.DataArray(
+                    D2_mean,
+                    dims=dims,
+                    attrs={
+                        "long_name": "mean squared ocean depth in cell",
+                        "units": "m2",
+                    },
+                ),
+            },
+            attrs={
+                "nx_sub": nx_sub,
+                "ny_sub": ny_sub,
+                "mask_hmin": mask_hmin,
+            },
+        )
+        return self.stats
 
     def set_from_dataset(
         self,
