@@ -1,7 +1,44 @@
 import numpy as np
 import pytest
+import tempfile
+from pathlib import Path
+import xarray as xr
 from mom6_forge.grid import Grid
 from mom6_forge.topo import Topo
+from mom6_forge._source_bathy import SourceBathy
+
+
+@pytest.fixture
+def get_curvilinear_supergrid():
+    """
+    Synthetic supergrid uniformly rotated by 30 degrees from East.
+    Every point has angle_dx = 30 degrees by construction, giving a known
+    ground truth to test against.
+    """
+    rotation_angle = 30.0  # degrees
+    nx, ny = 10, 10  # model cells
+    dx = dy = 0.1  # half-cell spacing in degrees
+    center_x, center_y = 10.0, 10.0  # well away from lat=0 to avoid cos issues
+
+    θ = np.deg2rad(rotation_angle)
+    nxp, nyp = 2 * nx + 1, 2 * ny + 1
+
+    # Build rotated grid via meshgrid
+    i_offsets = (np.arange(nxp) - nx) * dx
+    j_offsets = (np.arange(nyp) - ny) * dy
+    I, J = np.meshgrid(i_offsets, j_offsets)
+
+    x = center_x + I * np.cos(θ) - J * np.sin(θ)
+    y = center_y + I * np.sin(θ) + J * np.cos(θ)
+    angle_dx = np.full((nyp, nxp), rotation_angle)
+
+    return xr.Dataset(
+        {
+            "x": (["nyp", "nxp"], x),
+            "y": (["nyp", "nxp"], y),
+            "angle_dx": (["nyp", "nxp"], angle_dx),
+        }
+    )
 
 
 @pytest.fixture
@@ -252,3 +289,105 @@ def get_rect_topo(get_rect_grid, tmp_path):
     topo = Topo(get_rect_grid, min_depth=0, version_control_dir=tmp_path)
     topo.set_flat(1000)
     return topo
+
+
+@pytest.fixture
+def get_rect_topo_without_vc(get_rect_grid, tmp_path):
+    topo = Topo(get_rect_grid, min_depth=0, git=False)
+    topo.set_flat(1000)
+    return topo
+
+
+@pytest.fixture
+def synthetic_bathy_file():
+    """Create a temporary synthetic bathymetry NetCDF file for testing.
+
+    Covers the Panama region (278-282°E, 7-10°N) to match get_rect_grid().
+    """
+    with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
+        bathy_file = tmp.name
+
+    # Create synthetic bathymetry covering the Panama region
+    # get_rect_grid uses xstart=278, lenx=4, ystart=7, leny=3
+    # So we need lon 278-282, lat 7-10 with some buffer
+    lon = np.linspace(276, 284, 80)  # Cover 278-282 with buffer
+    lat = np.linspace(5, 12, 70)  # Cover 7-10 with buffer
+
+    # Create synthetic depth data (positive-up, like GEBCO)
+    # Ocean is negative (water), land is positive
+    elevation = np.full((len(lat), len(lon)), -500.0)  # Ocean baseline = 500m deep
+
+    # Add synthetic land masses (islands)
+    # Create an island around (280, 8.5)
+    lon_2d, lat_2d = np.meshgrid(lon, lat)
+    island_mask = (lon_2d - 280) ** 2 + (lat_2d - 8.5) ** 2 < 0.5
+    elevation[island_mask] = 200.0  # Synthetic island
+
+    ds = xr.Dataset(
+        {
+            "elevation": (["lat", "lon"], elevation),
+        },
+        coords={
+            "lon": lon,
+            "lat": lat,
+        },
+    )
+    ds.to_netcdf(bathy_file)
+
+    yield bathy_file
+
+    # Cleanup
+    Path(bathy_file).unlink()
+
+
+@pytest.fixture
+def get_simple_grid():
+    grid = Grid(
+        resolution=1,  # in degrees
+        xstart=1,  # min longitude in [0, 360]
+        lenx=2,  # longitude extent in degrees
+        ystart=1,  # min latitude in [-90, 90]
+        leny=2,  # latitude extent in degrees
+        name="panama1",
+    )
+    return grid
+
+
+@pytest.fixture
+def get_simple_global_grid():
+    grid = Grid(
+        resolution=1,  # in degrees
+        xstart=0,  # min longitude in [0, 360]
+        lenx=360,  # longitude extent in degrees
+        ystart=-90,  # min latitude in [-90, 90]
+        leny=180,  # latitude extent in degrees
+        name="panama1",
+        cyclic_x=True,
+    )
+    return grid
+
+
+@pytest.fixture
+def get_PM_seam_grid():
+    grid = Grid(
+        resolution=1,  # in degrees
+        xstart=359,  # min longitude in [0, 360]
+        lenx=2,  # longitude extent in degrees
+        ystart=-1,  # min latitude in [-90, 90]
+        leny=2,  # latitude extent in degrees
+        name="panama1",
+    )
+    return grid
+
+
+@pytest.fixture
+def get_dateline_seam_grid():
+    grid = Grid(
+        resolution=1,  # in degrees
+        xstart=-1,  # min longitude in [0, 360]
+        lenx=2,  # longitude extent in degrees
+        ystart=-1,  # min latitude in [-90, 90]
+        leny=2,  # latitude extent in degrees
+        name="panama1",
+    )
+    return grid
