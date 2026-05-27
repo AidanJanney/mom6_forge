@@ -1016,7 +1016,7 @@ class Grid:
 
         ds = self.supergrid.to_ds(name=self.name, author=author)
         ds.attrs["filename"] = os.path.basename(path)
-        ds.to_netcdf(path, format="NETCDF4", encoding={v: {"zlib": True, "complevel": 1} for v in ds.data_vars})
+        ds.to_netcdf(path, format="NETCDF4")
         return ds
 
     def get_esmf_ready_tracer_ds(self):
