@@ -873,6 +873,29 @@ class Topo:
         )
         return self.stats
 
+    def set_depth_from_stats(self, statistic):
+        """
+        Set the topo depth to a statistic computed by _compute_stats.
+
+        Parameters
+        ----------
+        statistic : str
+            Which depth statistic to use. Must be one of the "D_*" keys
+            in self.src.stats (e.g. "mean", "min", "max").
+        """
+
+        assert (
+            self.src is not None and self.src.stats is not None
+        ), "Source bathymetry must be provided and must have topo stats computed, please call compute_stats first if you have not already"
+        approved_list = []
+        for key in self.src.stats.data_vars:
+            if key.startswith("D_"):
+                approved_list.append(key[2:])
+        assert (
+            statistic in approved_list
+        ), f"Invalid statistic {statistic}, must be one of {approved_list}"
+
+        self.send_entire_depth_change_to_tcm(self.src.stats[f"D_{statistic}"])
     def generate_mask_from_stats_ocean_frac(
         self,
         mask_threshold=0.5,
