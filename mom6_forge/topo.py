@@ -8,13 +8,17 @@ from typing import Optional
 from scipy import interpolate
 from scipy.ndimage import label, binary_fill_holes
 from scipy.spatial import cKDTree
-from mom6_forge.utils import cell_area_rad
+from mom6_forge.utils import cell_area_rad, iterative_fill
 from mom6_forge.grid import Grid
 from mom6_forge.git_utils import get_domain_dir, get_repo
 from pathlib import Path
 from mom6_forge.edit_command import *
 from mom6_forge.command_manager import TopoCommandManager, CommandType
-from mom6_forge.mapping import regrid_dataset_via_xesmf, regrid_with_subsampling
+from mom6_forge.mapping import (
+    regrid_dataset_via_xesmf,
+    regrid_with_subsampling,
+    regrid_dataset_via_cressman,
+)
 from mom6_forge._source_bathy import SourceBathy
 from mom6_forge.channel_width import ChannelWidthList
 import regionmask
@@ -995,7 +999,7 @@ class Topo:
         fill_channels=False,
         is_input_positive_below_msl=False,
         output_dir=Path(""),
-        write_to_file=True,
+        write_to_file=False,
         regridding_method="bilinear",
         run_regrid_dataset=True,
         run_tidy_dataset=True,
@@ -1024,7 +1028,7 @@ class Topo:
                 but can also connect extra islands to land. Default: ``False``.
             is_input_positive_below_msl (Optional[bool]): If ``True``, it assumes that the
                 bathymetry vertical coordinate is positive downwards. Default: ``False``.
-            write_to_file (Optional[bool]): Whether to write the bathymetry to a file. Default: ``True``.
+            write_to_file (Optional[bool]): Whether to write the bathymetry to a file. Default: ``False``.
             regridding_method (Optional[str]): The type of regridding method to use. Defaults to self.regridding_method
             run_* (Optional[bool]): Whether to run the respective step in the bathymetry processing. Default: ``True``.
 
@@ -1129,6 +1133,68 @@ class Topo:
 
         print(
             "Configuration complete. Ready for regridding with MPI. See documentation for more details."
+        )
+
+    def direct_cressman_interp(
+        self,
+        smooth_scl=2.0,
+        cressman_exp=2.0,
+        weights_path=None,
+    ):
+        """
+        Assign ocean depths using Cressman distance-weighted interpolation.
+        Mirrors ``interp_smooth.f90`` from the tx2_3 topography workflow.
+
+        For each ocean T-cell a smoothing radius ``L = smooth_scl * sqrt(cell_area)``
+        is computed. Source ocean points within ``L`` are averaged with weights
+
+        .. math::
+
+            w = \\left(\\frac{L^2 - r^2}{L^2 + r^2}\\right)^{c}
+
+        where ``r`` is the great-circle arc distance and ``c = cressman_exp``.
+        Only source points with positive depth (ocean) contribute, so depth
+        estimates are never contaminated by land elevations.
+
+        Weights are computed by :func:`~mom6_forge.mapping.compute_cressman_weights`,
+        saved to an ESMF-compatible netCDF, and applied through ``xe.Regridder`` —
+        all orchestrated by :func:`~mom6_forge.mapping.regrid_dataset_via_cressman`.
+        Cells that receive no source coverage are filled by iterative neighbour
+        averaging (up to 100 passes).
+
+        Parameters
+        ----------
+        smooth_scl : float
+            Smoothing scale multiplier for the Cressman radius. Default ``2.0``.
+        cressman_exp : float
+            Exponent for the Cressman weight function. Default ``2.0``.
+        weights_path : str or Path or None
+            Where to save the ESMF weights netCDF. If ``None``, a file named
+            ``cressman_weights.nc`` is written next to the bathymetry file.
+        """
+        if weights_path is None:
+            weights_path = self.src.path.parent / "cressman_weights.nc"
+
+        # --- Regrid via mapping module (weights → file → cressman Regridder) ---
+
+        dst_ds = self._grid.get_esmf_ready_tracer_ds()
+        dst_ds["area"] = self._grid.tarea
+        dst_ds["mask"] = self.tmask
+
+        depth_dst, unfilled = regrid_dataset_via_cressman(
+            self.src.ds,
+            dst_ds,
+            smooth_scl=smooth_scl,
+            cressman_exp=cressman_exp,
+            weights_path=weights_path,
+        )
+
+        depth_arr = iterative_fill(depth_dst["depth"].values, unfilled, self.tmask)
+
+        self.send_entire_depth_change_to_tcm(
+            xr.DataArray(
+                depth_arr.astype(float), dims=["ny", "nx"], attrs={"units": "m"}
+            )
         )
 
     def tidy_dataset(
